@@ -1,0 +1,2 @@
+"./multipleattributes.test", line 6: parse error at or near BOOL_CONST = true
+Compilation halted due to lex and parse errors
