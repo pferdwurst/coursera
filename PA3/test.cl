@@ -7,7 +7,12 @@ class Bar inherits IO {
 
      d : Object <- printh();
 
-     printh() : Int { { out_int(h); 0; } };
+     printh() : Int { 
+	         { 
+		  outuint(h); 
+		  0; 
+		 } 
+		};
 
      doh() : Int { (let i: Int <- h in { h <- h + 1; i; } ) };
 
