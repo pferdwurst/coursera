@@ -1,5 +1,9 @@
 import java.io.PrintStream;
+import java.util.ArrayDeque;
+import java.util.Arrays;
+import java.util.Deque;
 import java.util.Enumeration;
+import java.util.List;
 
 /**
  * This class may be used to contain the semantic information such as the
@@ -11,13 +15,15 @@ class ClassTable {
 	private PrintStream errorStream;
 
 	private AbstractSymbol filename;
+	public Classes baseClasses;
+	public Classes allClasses;
 
 	/**
 	 * Creates data structures representing basic Cool classes (Object, IO, Int,
 	 * Bool, String). Please note: as is this method does not do anything
 	 * useful; you will need to edit it to make if do what you want.
 	 * */
-	private void installBasicClasses() {
+	private void installBasicClasses(ASTVisitor visitor) {
 		AbstractSymbol filename = AbstractTable.stringtable
 				.addString("<basic class>");
 
@@ -154,31 +160,156 @@ class ClassTable {
 		 * Do somethind with Object_class, IO_class, Int_class, Bool_class, and
 		 * Str_class here
 		 */
-		allClasses.appendElement(Object_class).appendElement(IO_class)
+		baseClasses = new Classes(1);
+		baseClasses.appendElement(Object_class).appendElement(IO_class)
 				.appendElement(Int_class).appendElement(Bool_class)
 				.appendElement(Str_class);
 
+		for (Enumeration e = baseClasses.getElements(); e.hasMoreElements();) {
+			class_c c = (class_c) e.nextElement();
+
+			SymbolTable st = baseSymbolTable();
+
+			visitor.setSymbolTable(st);
+			c.accept(visitor);
+			c.setSymbolTable(st);
+
+			allClasses.appendElement(c);
+		}
+
 	}
 
-	private Classes allClasses;
+	private SymbolTable baseSymbolTable() {
+		SymbolTable st = new SymbolTable();
+		st.enterScope();
+		st.addId(TreeConstants.Object_, TreeConstants.Object_);
+		st.addId(TreeConstants.cool_abort, TreeConstants.Object_);
+		st.addId(TreeConstants.copy, TreeConstants.SELF_TYPE);
+		st.addId(TreeConstants.type_name, TreeConstants.Str);
+		// for (AbstractSymbol cn : baseClasses) {
+		// st.addId(cn, cn);
+		// }
+		return st;
+	}
+
+	/**
+	 * Find the least common ancestor of 2 objects. If the A inherits from B
+	 * then B can be the LCA of the pair
+	 * 
+	 * @param t1
+	 * @param t2
+	 * @return
+	 */
+	public AbstractSymbol lub(AbstractSymbol t1, AbstractSymbol t2) {
+		// Short-circuit if both types are identical
+		if (t1 == t2) {
+			return t1;
+		}
+		
+		AbstractSymbol lub = TreeConstants.Object_;
+
+		try {
+
+			Deque<AbstractSymbol> t1Stack = new ArrayDeque<AbstractSymbol>();
+
+			// find ancestor path of t1
+			class_c t1_class = getClassFor(t1);
+
+			t1Stack.push(t1);
+
+			while (t1Stack.peek() != TreeConstants.Object_) {
+				t1Stack.push(t1_class.getParent());
+				t1_class = getClassFor(t1_class.getParent());
+			}
+
+			Deque<AbstractSymbol> t2Stack = new ArrayDeque<AbstractSymbol>();
+			t2Stack.push(t2);
+			class_c t2_class = getClassFor(t2);
+
+			/*
+			 * while first element in deque not equal to
+			 */
+			while (t2Stack.peek() != TreeConstants.Object_) {
+				t2Stack.push(t2_class.getParent());
+				t2_class = getClassFor(t2_class.getParent());
+			}
+
+			while (t1Stack.peek() == t2Stack.peek() && !t1Stack.isEmpty()
+					&& !t2Stack.isEmpty()) {
+				lub = t1Stack.peek();
+				t1Stack.pop();
+				t2Stack.pop();
+			}
+
+		} catch (Exception e) {
+			// swallow error. Yikes!
+		}
+		return lub;
+	}
 
 	public ClassTable(Classes cls) {
 		semantErrors = 0;
 		errorStream = System.err;
+		allClasses = new Classes(1);
+		boolean containsMain = false;
 
 		/* fill this in */
+		ASTVisitor astv = new ASTVisitor(this);
 
-		allClasses = new Classes(1);
-		installBasicClasses();
+		installBasicClasses(astv);
 
-		/*
-		 * What do I do with cls?
-		 */
+		// Grab the filename from the first class
+		class_c firstClass = ((class_c) cls.getElements().nextElement());
+		filename = firstClass.filename;
+
+		/* some semantic analysis code may go here */
 		for (Enumeration e = cls.getElements(); e.hasMoreElements();) {
-			allClasses.appendElement((TreeNode) e.nextElement());
+			class_c c = (class_c) e.nextElement();
+			if (c.name == TreeConstants.Main) {
+				containsMain = true;
+			}
+
+			SymbolTable st;
+			try {
+				if (c.parent == null) {
+					c.parent = TreeConstants.Object_;
+				}
+				st = getClassFor(c.parent).getSymbolTable().copy();
+
+			} catch (Exception ex) {
+				// Yikes, swallow another error!
+				st = new SymbolTable();
+				st.enterScope();
+			}
+
+			// Is a basic class being redefined?
+			if (baseClasses.contains(c.name) ) {
+				semantError(filename, c).println(
+						"Redefinition of basic class " + c.name + ".");
+			}
+			// Verify that we're not redefining a class
+			if (allClasses.contains(c.name)) {
+				semantError(c).println(
+						"Class " + c.name + " was previously defined.");
+			}
+
+			st.enterScope();
+			astv.setSymbolTable(st);
+			c.accept(astv);
+			c.setSymbolTable(st);
+
+			allClasses.appendElement((TreeNode) c);
+
 		}
-		// Grab the first class
-		filename = ((class_c) cls.getElements().nextElement()).filename;
+
+		if (!containsMain) {
+			semantError().println("Class Main is not defined.");
+		}
+		if (errors()) {
+			System.err
+					.println("Compilation halted due to static semantic errors.");
+			System.exit(1);
+		}
 	}
 
 	public Classes getClasses() {
@@ -244,10 +375,14 @@ class ClassTable {
 		for (Enumeration<class_c> e = allClasses.getElements(); e
 				.hasMoreElements();) {
 			class_c k1 = e.nextElement();
-			if (k1.getName() == t1) {
+			if (k1.getName().equalString(t1.str, t1.str.length())) {
 				return k1;
 			}
 		}
 		throw new Exception("Cannot find class for " + t1);
+	}
+
+	public boolean contains(AbstractSymbol class_name) {
+		return allClasses.contains(class_name);
 	}
 }

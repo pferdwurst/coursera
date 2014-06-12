@@ -1,8 +1,6 @@
+import java.io.PrintStream;
 import java.util.Enumeration;
-import java.util.HashSet;
-import java.util.LinkedList;
 import java.util.List;
-import java.util.Set;
 
 /**
  * 
@@ -12,23 +10,19 @@ import java.util.Set;
  * @author compilers
  * 
  */
-public class ASTVisitor implements Visitor {
+public class TypeChecker implements Visitor {
 
 	static final String[] keywords = { "case", "if" };
 
-	protected ClassTable classTable;
-
+	private ClassTable classTable;
 	private SymbolTable symbolTable;
+	private PrintStream errorOut;
 
 	/**
 	 * 
 	 */
-	public ASTVisitor(ClassTable ct) {
+	public TypeChecker(ClassTable ct) {
 		classTable = ct;
-	}
-
-	public void setSymbolTable(SymbolTable st) {
-		symbolTable = st;
 	}
 
 	/*
@@ -39,92 +33,69 @@ public class ASTVisitor implements Visitor {
 	@Override
 	public void visit(class_c c) {
 
-		// Check that it doesn't inherit Int, Bool or String?
-		if (c.parent == TreeConstants.Bool || c.parent == TreeConstants.Str
-				|| c.parent == TreeConstants.Int
-				|| c.parent == TreeConstants.SELF_TYPE) {
+		symbolTable = c.getSymbolTable();
 
-			classTable.error(c, "Class " + c.name + " cannot inherit class "
-					+ c.parent + ".");
+		if (c.name != TreeConstants.Object_) {
+			try {
+				// Check that parent exists
+				classTable.getClassFor(c.parent);
+			} catch (Exception e) {
+				classTable
+						.error(c, "Class " + c.name
+								+ " inherits from an undefined class "
+								+ c.parent + ".");
+			}
 		}
-		symbolTable.addId(AbstractTable.idtable.addString("type_of_self"),
-				c.name);
+
 		for (Enumeration e = c.features.getElements(); e.hasMoreElements();) {
 			Object o = e.nextElement();
 			((TreeNode) o).accept(this);
 		}
-
 	}
 
 	@Override
 	public void visit(method m) {
-
-		// Check if this is an override
-		if (symbolTable.find(m.name) != null
-				&& m.name != TreeConstants.cool_abort
-				&& m.name != TreeConstants.copy
-				&& m.name != TreeConstants.type_name) {
-
-			List<AbstractSymbol> formalTypes = (List) symbolTable
-					.lookup(AbstractTable.idtable.lookup(m.name.str
-							+ "_formals"));
-
-			if (formalTypes != null
-					&& m.formals.getLength() != formalTypes.size()) {
-				classTable.error(m,
-						"Incompatible number of formal parameters in redefined method "
-								+ m.name + ".");
-			}
-		}
-
 		symbolTable.enterScope();
 
-		// Check for duplicate formals
-		Set<AbstractSymbol> formalIds = new HashSet<AbstractSymbol>();
-		List<AbstractSymbol> formalTypes = new LinkedList<AbstractSymbol>();
-
-		for (Enumeration e = m.formals.getElements(); e.hasMoreElements();) {
-			formalc f = (formalc) e.nextElement();
-			if (!formalIds.add(f.name)) {
-				classTable.error(f, "Formal parameter " + f.name
-						+ " is multiply defined.");
-			}
-			formalTypes.add(f.type_decl);
+		
+		for (int i = 0; i < m.formals.getLength(); i++) {
+			formalc f = (formalc) m.formals.getNth(i);
 			f.accept(this);
 		}
 		m.expr.accept(this);
 		symbolTable.exitScope();
-		// Add parameter type information
-		symbolTable.addId(
-				AbstractTable.idtable.addString(m.name.str + "_formals"),
-				formalTypes);
+
+		// Verify that return type is known
+		if (!classTable.contains(m.return_type)) {
+			classTable.error(m, "Undefined return type " + m.return_type
+					+ " in method " + m.name + ".");
+		}
 		symbolTable.addId(m.name, m.return_type);
+
+		AbstractSymbol return_type = m.expr.get_type();
+		if (return_type != m.return_type) {
+			if (return_type == TreeConstants.SELF_TYPE) {
+				return_type = symbolTable.find(AbstractTable.idtable
+						.lookup("type_of_self"));
+			}
+
+			if (classTable.lub(return_type, m.return_type) != m.return_type) {
+				classTable.error(m, "Inferred return type " + m.expr.get_type()
+						+ " of method " + m.name
+						+ " does not conform to declared return type "
+						+ m.return_type + ".");
+			}
+		}
 	}
 
 	@Override
 	public void visit(attr a) {
-		if (a.name.equalString("self", 4)) {
-			classTable.error(a, "Cannot assign to 'self'.");
-		}
-		if (symbolTable.find(a.name) != null) {
-			classTable.error(a, "Attribute " + a.name
-					+ " is an attribute of an inherited class");
-		}
 		a.init.accept(this);
-
-		symbolTable.addId(a.name, a.type_decl);
 	}
 
 	@Override
 	public void visit(formalc f) {
-		if (f.name.equalString("self", 4)) {
-			classTable.error(f,
-					"'self' cannot be the name of a formal parameter.");
-		}
-		if (f.type_decl == TreeConstants.SELF_TYPE) {
-			classTable.error(f, "Formal parameter " + f.type_decl
-					+ " cannot have type SELF_TYPE.");
-		}
+
 		symbolTable.addId(f.name, f.type_decl);
 	}
 
@@ -144,31 +115,32 @@ public class ASTVisitor implements Visitor {
 
 		AbstractSymbol case_type = TreeConstants.No_type;
 
-		// Check for duplicate branches
-		Set<AbstractSymbol> branch_types = new HashSet<AbstractSymbol>();
-
 		for (Enumeration e = t.cases.getElements(); e.hasMoreElements();) {
 			Object o = e.nextElement();
-			// visit branch
-			branch b = (branch) o;
-			b.accept(this);
-			if (!branch_types.add(b.type_decl)) {
-				classTable.error(t, "Duplicate branch " + b.type_decl
-						+ " in case statement.");
-			}
-			case_type = classTable.lub(case_type, b.type_decl);
+			((TreeNode) o).accept(this);
+			case_type = classTable.lub(case_type, ((branch) o).type_decl);
 		}
 		t.set_type(case_type);
 	}
 
 	@Override
 	public void visit(assign a) {
-		if (a.name.equalString("self", 4)) {
-			classTable.error(a, "Cannot assign to 'self'.");
-		}
+		// do we need this 2nd pass?
 		a.expr.accept(this);
 
-		a.set_type(symbolTable.find(a.name));
+		AbstractSymbol id_type = symbolTable.find(a.name);
+
+		if (classTable.lub(a.expr.get_type(), id_type) != id_type) {
+			classTable
+					.error(a,
+							"Type "
+									+ a.expr.get_type()
+									+ " of assigned expression does not conform to declared type "
+									+ id_type + " of identifier " + a.name
+									+ ".");
+		}
+
+		a.set_type(id_type);
 	}
 
 	/**
@@ -179,13 +151,39 @@ public class ASTVisitor implements Visitor {
 
 		for (@SuppressWarnings("rawtypes")
 		Enumeration e = sd.actual.getElements(); e.hasMoreElements();) {
-			((TreeNode) e.nextElement()).accept(this);
+			Object n = e.nextElement();
+			if (((Expression) n).get_type() == null) {
+				((TreeNode) n).accept(this);
+			}
 		}
-		((TreeNode) sd.expr).accept(this);
-		sd.expr.set_type(sd.expr.get_type());
+		if (sd.expr.get_type() == null) {
+			// Visit e0
+			sd.expr.accept(this);
+		}
 
 		AbstractSymbol id_type = sd.expr.get_type();
-		AbstractSymbol dispatch_method_type = symbolTable.find(sd.name);
+
+		if (classTable.lub(id_type, sd.type_name) != sd.type_name) {
+			classTable.error(sd, "Expression type " + id_type
+					+ " does not conform to declared static dispatch type "
+					+ sd.type_name + ".");
+		}
+
+		AbstractSymbol dispatch_method_type = null;
+
+		if (id_type != TreeConstants.SELF_TYPE) {
+			class_c method_class;
+			try {
+				method_class = classTable.getClassFor(id_type);
+				dispatch_method_type = method_class.getSymbolTable().find(
+						sd.name);
+			} catch (Exception e) {
+				// TODO Auto-generated catch block
+				e.printStackTrace();
+			}
+		} else {
+			dispatch_method_type = symbolTable.find(sd.name);
+		}
 
 		if (dispatch_method_type == TreeConstants.SELF_TYPE) {
 			sd.set_type(id_type);
@@ -207,19 +205,37 @@ public class ASTVisitor implements Visitor {
 		 * e1..en -> d.actual
 		 */
 
-		for (@SuppressWarnings("rawtypes")
-		Enumeration e = d.actual.getElements(); e.hasMoreElements();) {
-			((TreeNode) e.nextElement()).accept(this);
+		List<AbstractSymbol> formalTypes = (List) symbolTable
+				.lookup(AbstractTable.idtable.lookup(d.name.str + "_formals"));
+
+		for (int i = 0; i < d.actual.getLength(); i++) {
+			Expression f = (Expression) d.actual.getNth(i);
+
+			f.accept(this);
+
+			if (formalTypes != null && f.get_type() != TreeConstants.SELF_TYPE
+					&& f.get_type() != formalTypes.get(i)) {
+				classTable.error(
+						d,
+						"In call of method " + d.name + ", type "
+								+ f.get_type() + " of parameter " + i
+								+ " does not conform to declared type "
+								+ formalTypes.get(i) + ".");
+			}
+
 		}
 
-		// Visit e0
-		d.expr.accept(this);
+		for (@SuppressWarnings("rawtypes")
+		Enumeration e = d.actual.getElements(); e.hasMoreElements();) {
+			Expression expr = (Expression) e.nextElement();
+			expr.accept(this);
 
-		/*
-		 * Type of dispatch is the value of the 'expr' If the 'expr' is of type
-		 * SELF_TYPE then the dispatch type is the type of the id receiving the
-		 * dispatch. Otherwise it's the type of 'expr'
-		 */
+		}
+		if (d.expr.get_type() == null) {
+			// Visit e0
+			d.expr.accept(this);
+		}
+
 		AbstractSymbol id_type = d.expr.get_type();
 		AbstractSymbol dispatch_method_type = TreeConstants.No_type;
 
@@ -229,13 +245,27 @@ public class ASTVisitor implements Visitor {
 				method_class = classTable.getClassFor(id_type);
 				dispatch_method_type = method_class.getSymbolTable().find(
 						d.name);
+				if (dispatch_method_type == null) {
+
+					classTable.error(d, "Dispatch to undefined method "
+							+ d.name + ".");
+				}
 			} catch (Exception e) {
-				// TODO Yikes, swallowing error
-				// e.printStackTrace();
+				// Ooops, swallow error
+				// No class found
 			}
 		} else {
 			dispatch_method_type = symbolTable.find(d.name);
 		}
+
+		/*
+		 * Type of dispatch is the value of the 'expr'
+		 * 
+		 * If the 'expr' is of type SELF_TYPE then the dispatch type is the type
+		 * of the id receiving the dispatch.
+		 * 
+		 * Otherwise it's the type of 'expr'
+		 */
 
 		if (dispatch_method_type == TreeConstants.SELF_TYPE) {
 			d.set_type(id_type);
@@ -256,10 +286,8 @@ public class ASTVisitor implements Visitor {
 
 	@Override
 	public void visit(loop l) {
+
 		l.pred.accept(this);
-		if (l.pred.get_type() != TreeConstants.Bool) {
-			classTable.error(l, "Loop condition does not have type Bool");
-		}
 		l.body.accept(this);
 		l.set_type(l.body.get_type());
 	}
@@ -272,10 +300,10 @@ public class ASTVisitor implements Visitor {
 		symbolTable.enterScope();
 
 		for (Enumeration e = b.body.getElements(); e.hasMoreElements();) {
-			Expression expr = (Expression) e.nextElement();
-			expr.accept(this);
-			AbstractSymbol expr_type = expr.get_type();
-			symbolTable.addId(blockName, expr_type);
+			Object o = e.nextElement();
+			((TreeNode) o).accept(this);
+
+			symbolTable.addId(blockName, ((Expression) o).get_type());
 		}
 
 		b.set_type((AbstractSymbol) symbolTable.probe(blockName));
@@ -290,15 +318,19 @@ public class ASTVisitor implements Visitor {
 				+ String.format("%03d", l.lineNumber), 6, 8);
 		symbolTable.enterScope();
 
-		if (l.identifier.equalString("self", 4)) {
-			classTable.error(l, "'self' cannot be bound in a 'let' expression");
-		}
-
 		symbolTable.addId(l.identifier, l.type_decl);
 
 		// Verify init if exists
 		if (!(l.init instanceof no_expr)) {
 			l.init.accept(this);
+
+			if (classTable.lub(l.init.get_type(), l.type_decl) != l.type_decl) {
+				classTable.error(l, "Inferred type " + l.init.get_type()
+						+ " of initialization of " + l.identifier
+						+ " does not conform to identifier's declared type "
+						+ l.type_decl);
+			}
+
 		}
 		l.body.accept(this);
 
@@ -311,6 +343,13 @@ public class ASTVisitor implements Visitor {
 		p.e1.accept(this);
 		p.e2.accept(this);
 
+		if (p.e1.get_type() != TreeConstants.Int
+				|| p.e2.get_type() != TreeConstants.Int) {
+
+			classTable.error(p, "non-Int arguments: " + p.e1.get_type() + " + "
+					+ p.e2.get_type());
+		}
+
 		p.set_type(TreeConstants.Int);
 	}
 
@@ -319,6 +358,12 @@ public class ASTVisitor implements Visitor {
 		s.e1.accept(this);
 		s.e2.accept(this);
 
+		if (s.e1.get_type() != TreeConstants.Int
+				|| s.e2.get_type() != TreeConstants.Int) {
+
+			classTable.error(s, "non-Int arguments: " + s.e1.get_type() + " - "
+					+ s.e2.get_type());
+		}
 		s.set_type(TreeConstants.Int);
 	}
 
@@ -327,6 +372,12 @@ public class ASTVisitor implements Visitor {
 		m.e1.accept(this);
 		m.e2.accept(this);
 
+		if (m.e1.get_type() != TreeConstants.Int
+				|| m.e2.get_type() != TreeConstants.Int) {
+
+			classTable.error(m, "non-Int arguments: " + m.e1.get_type() + " * "
+					+ m.e2.get_type());
+		}
 		m.set_type(TreeConstants.Int);
 	}
 
@@ -334,6 +385,13 @@ public class ASTVisitor implements Visitor {
 	public void visit(divide d) {
 		d.e1.accept(this);
 		d.e2.accept(this);
+
+		if (d.e1.get_type() != TreeConstants.Int
+				|| d.e2.get_type() != TreeConstants.Int) {
+
+			classTable.error(d, "non-Int arguments: " + d.e1.get_type() + " / "
+					+ d.e2.get_type());
+		}
 
 		d.set_type(TreeConstants.Int);
 	}
@@ -348,7 +406,12 @@ public class ASTVisitor implements Visitor {
 	public void visit(lt lt) {
 		lt.e1.accept(this);
 		lt.e2.accept(this);
+		if (lt.e1.get_type() != TreeConstants.Int
+				|| lt.e2.get_type() != TreeConstants.Int) {
 
+			classTable.error(lt, "non-Int arguments: " + lt.e1.get_type()
+					+ " < " + lt.e2.get_type());
+		}
 		lt.set_type(TreeConstants.Bool);
 	}
 
@@ -358,6 +421,14 @@ public class ASTVisitor implements Visitor {
 
 		eq.e2.accept(this);
 
+		if (eq.e1.get_type() == TreeConstants.Bool
+				|| eq.e1.get_type() == TreeConstants.Int
+				|| eq.e1.get_type() == TreeConstants.Str) {
+			if (eq.e1.get_type() != eq.e2.get_type()) {
+				classTable.error(eq, "Illegal comparison with a basic type.");
+			}
+		}
+
 		eq.set_type(TreeConstants.Bool);
 	}
 
@@ -366,6 +437,11 @@ public class ASTVisitor implements Visitor {
 		leq.e1.accept(this);
 		leq.e2.accept(this);
 
+		if (leq.e1.get_type() != TreeConstants.Int
+				|| leq.e2.get_type() != TreeConstants.Int) {
+			classTable.error(leq, "non-Int arguments:" + leq.e1.get_type()
+					+ " <= " + leq.e2.get_type());
+		}
 		leq.set_type(TreeConstants.Bool);
 	}
 
@@ -378,7 +454,6 @@ public class ASTVisitor implements Visitor {
 
 	@Override
 	public void visit(int_const i) {
-		i.set_type(TreeConstants.Int);
 	}
 
 	/*
@@ -388,24 +463,23 @@ public class ASTVisitor implements Visitor {
 	 */
 	@Override
 	public void visit(bool_const b) {
-		// TODO Auto-generated method stub
-		b.set_type(TreeConstants.Bool);
 	}
 
 	@Override
 	public void visit(string_const s) {
-		s.set_type(TreeConstants.Str);
 	}
 
 	@Override
 	public void visit(new_ n) {
-		n.set_type(n.type_name);
+		if (!classTable.contains(n.type_name)) {
+			classTable.error(n, "'new' used with undefined class "
+					+ n.type_name + ".");
+		}
 	}
 
 	@Override
 	public void visit(isvoid iv) {
 		iv.e1.accept(this);
-		iv.set_type(TreeConstants.Bool);
 	}
 
 	@Override
@@ -423,7 +497,6 @@ public class ASTVisitor implements Visitor {
 			AbstractSymbol type = symbolTable.find(o.name);
 			if (type == null) {
 				classTable.error(o, "Undeclared identifier " + o.name + ".");
-				type = TreeConstants.No_type;
 			}
 			o.set_type(type);
 
